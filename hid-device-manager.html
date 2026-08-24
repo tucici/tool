@@ -690,6 +690,7 @@
             const btn = document.getElementById('lang-btn');
             if (btn) btn.textContent = currentLang === 'en' ? '中文' : 'English';
             if (typeof updateFirmwareButton === 'function') updateFirmwareButton();
+            if (typeof renderDeviceList === 'function') renderDeviceList();
         }
         function toggleLanguage() {
             currentLang = currentLang === 'en' ? 'zh' : 'en';
