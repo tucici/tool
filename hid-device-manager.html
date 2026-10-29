@@ -561,6 +561,30 @@
                 <p><strong data-i18n="labelPid">PID: </strong><span id="connected-pid">-</span></p>
             </div>
 
+            <div class="panel-header" style="margin-top: 30px; --panel-icon: '📤'"><span data-i18n="cmdHeader">Send Command</span></div>
+
+            <div style="margin-bottom: 10px;">
+                <label style="font-size: 13px; color: #aaa; display: block; margin-bottom: 6px;" data-i18n="cmdInputLabel">Hex data (e.g. 56 00 00 00 00 00 AA or 560000000000AA):</label>
+                <div style="display: flex; gap: 8px;">
+                    <input type="text" id="cmd-input" placeholder="56 00 00 00 00 00 AA"
+                        style="flex: 1; background: #1a1a1a; border: 2px solid #3d3d3d; border-radius: 8px; padding: 10px 14px; color: #fff; font-family: 'Courier New', monospace; font-size: 14px; outline: none; transition: border-color 0.3s;"
+                        onfocus="this.style.borderColor='#4CAF50'" onblur="this.style.borderColor='#3d3d3d'"
+                        onkeydown="if(event.key==='Enter') sendCommand()">
+                    <button class="btn btn-primary" id="send-cmd-btn" onclick="sendCommand()" disabled style="white-space: nowrap;" data-i18n="cmdSendBtn">📤 Send</button>
+                </div>
+            </div>
+
+            <div style="display: flex; gap: 16px; align-items: center; margin-bottom: 10px; flex-wrap: wrap;">
+                <label style="font-size: 13px; color: #aaa; display: flex; align-items: center; gap: 6px; cursor: pointer;">
+                    <input type="checkbox" id="cmd-log-rx" checked style="accent-color: #4CAF50; width: 16px; height: 16px; cursor: pointer;">
+                    <span data-i18n="cmdLogRx">Log received data</span>
+                </label>
+                <button class="btn" style="padding: 6px 14px; font-size: 12px; background: linear-gradient(135deg, #FF9800, #F57C00); box-shadow: none;" onclick="sendPresetCmd('version')" data-i18n="cmdPresetVersion">📋 Query Version</button>
+            </div>
+
+            <div id="cmd-history" style="background: #1a1a1a; border: 2px solid #333; border-radius: 8px; padding: 10px; max-height: 120px; overflow-y: auto; font-family: 'Courier New', monospace; font-size: 12px; margin-top: 8px; display: none;">
+            </div>
+
             <div class="panel-header" style="margin-top: 30px; --panel-icon: '⬆️'"><span data-i18n="fwHeader">Firmware Update</span></div>
             <button class="btn firmware-btn" id="firmware-btn" onclick="selectFirmwareFile()" disabled>
                 <span data-i18n="fwBtnNeedConnect">📤 Select Firmware File</span>
@@ -672,6 +696,15 @@
             help3: { en: 'Select a device, then click "Connect"', zh: '选中设备后点击"连接设备"进行连接' },
             help4: { en: 'After connecting you can run a firmware update', zh: '连接成功后可进行固件更新操作' },
             help5: { en: 'Works in Chromium-based browsers such as Chrome and Edge', zh: '支持Chrome、Edge等基于Chromium的浏览器' },
+            cmdHeader: { en: '📤 Send Command', zh: '📤 发送指令' },
+            cmdInputLabel: { en: 'Hex data (e.g. 56 00 00 00 00 00 AA or 560000000000AA):', zh: '十六进制数据（如 56 00 00 00 00 00 AA 或 560000000000AA）：' },
+            cmdSendBtn: { en: '📤 Send', zh: '📤 发送' },
+            cmdLogRx: { en: 'Log received data', zh: '记录接收数据' },
+            cmdPresetVersion: { en: '📋 Query Version', zh: '📋 查询版本' },
+            cmdSent: { en: '→ Sent: {0}', zh: '→ 已发送: {0}' },
+            cmdRecv: { en: '← Recv: {0}', zh: '← 接收: {0}' },
+            cmdInvalidHex: { en: '⚠️ Invalid hex data. Use space-separated hex bytes (00-FF).', zh: '⚠️ 无效的十六进制数据，请输入空格分隔的十六进制字节（00-FF）。' },
+            cmdEmpty: { en: '⚠️ Please enter data to send', zh: '⚠️ 请输入要发送的数据' },
         };
 
         function t(key) {
@@ -1041,9 +1074,11 @@
         function updateConnectionButtons() {
             const connectBtn = document.getElementById('connect-btn');
             const disconnectBtn = document.getElementById('disconnect-btn');
+            const sendCmdBtn = document.getElementById('send-cmd-btn');
 
             connectBtn.disabled = !selectedDevice || connectedDevice === selectedDevice;
             disconnectBtn.disabled = !connectedDevice;
+            if (sendCmdBtn) sendCmdBtn.disabled = !connectedDevice;
         }
 
         async function connectDevice() {
@@ -1109,6 +1144,11 @@
 
         function handleInputReport(event) {
             const data = new Uint8Array(event.data.buffer);
+            // 记录接收数据（如果勾选了"记录接收数据"）
+            if (document.getElementById('cmd-log-rx')?.checked) {
+                const hexStr = Array.from(data).map(b => b.toString(16).padStart(2, '0')).join(' ');
+                addLog(tf('cmdRecv', hexStr), 'normal');
+            }
             // 只有手动点击"固件更新"并选择文件后，otaActive 才为 true；否则只监听不发送任何数据
             if (!otaActive) return;
             if (data.length !== 0 && data[1] !== 0x81) {
@@ -1231,6 +1271,100 @@
             } catch (error) {
                 addLog(tf('sendDataFail', error.message), 'error');
             }
+        }
+
+        async function sendCommand() {
+            if (!connectedDevice || !connectedDevice.opened) {
+                addLog(t('notConnectedSend'), 'error');
+                return;
+            }
+
+            const input = document.getElementById('cmd-input');
+            const raw = (input.value || '').trim();
+            if (!raw) {
+                addLog(t('cmdEmpty'), 'warning');
+                return;
+            }
+
+            // 解析十六进制字符串 - 支持多种格式
+            // 1. 空格分隔: "56 00 00 00 00 00 AA"
+            // 2. 连续字符串: "560000000000AA"
+            // 3. 混合: "56 0000 0000 00AA"
+            // 4. 带 0x 前缀: "0x56 0x00" 或 "0x560000000000AA"
+            let cleanRaw = raw.replace(/^0x/i, '').replace(/\s+/g, '');
+            
+            // 检查是否为有效的十六进制字符串（偶数长度）
+            if (!/^[0-9a-f]+$/i.test(cleanRaw)) {
+                addLog(t('cmdInvalidHex'), 'error');
+                return;
+            }
+            
+            if (cleanRaw.length % 2 !== 0) {
+                addLog(t('cmdInvalidHex'), 'error');
+                return;
+            }
+
+            // 每两个字符解析为一个字节
+            const bytes = [];
+            for (let i = 0; i < cleanRaw.length; i += 2) {
+                bytes.push(parseInt(cleanRaw.substr(i, 2), 16));
+            }
+
+            if (bytes.length === 0) {
+                addLog(t('cmdEmpty'), 'warning');
+                return;
+            }
+
+            const hexStr = bytes.map(b => b.toString(16).padStart(2, '0')).join(' ');
+            addLog(tf('cmdSent', hexStr), 'success');
+
+            try {
+                await connectedDevice.sendReport(0, new Uint8Array(bytes));
+                // 添加到历史记录
+                addToCmdHistory(raw);
+            } catch (error) {
+                addLog(tf('sendDataFail', error.message), 'error');
+            }
+        }
+
+        function sendPresetCmd(type) {
+            const input = document.getElementById('cmd-input');
+            switch (type) {
+                case 'version':
+                    // 查询固件版本指令（与 OTA 的 version 查询一致）
+                    input.value = '02 04 00 00 00 00 00';
+                    break;
+            }
+            sendCommand();
+        }
+
+        function addToCmdHistory(hexStr) {
+            let historyDiv = document.getElementById('cmd-history');
+            if (!historyDiv) return;
+
+            // 去重：如果已存在相同指令，移到最前面
+            const existing = historyDiv.querySelectorAll('.cmd-history-item');
+            existing.forEach(item => {
+                if (item.dataset.cmd === hexStr) item.remove();
+            });
+
+            const item = document.createElement('div');
+            item.className = 'cmd-history-item';
+            item.dataset.cmd = hexStr;
+            item.style.cssText = 'padding: 4px 8px; margin: 2px 0; background: #252525; border-radius: 4px; cursor: pointer; display: flex; justify-content: space-between; align-items: center;';
+            item.innerHTML = `<span style="color: #aaa;">${hexStr}</span><span style="color: #4CAF50; font-size: 11px;">点击重发</span>`;
+            item.onclick = () => {
+                document.getElementById('cmd-input').value = hexStr;
+                sendCommand();
+            };
+
+            historyDiv.insertBefore(item, historyDiv.firstChild);
+
+            // 最多保留 10 条历史
+            while (historyDiv.children.length > 10) {
+                historyDiv.removeChild(historyDiv.lastChild);
+            }
+            historyDiv.style.display = 'block';
         }
 
         function updateProgress(status, percent) {
